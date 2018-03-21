@@ -2,11 +2,11 @@
 
 This repository includes my implementation of the paper with tensorflow 0.10:
 
-@article{cornia2016predicting,
-  title={Predicting human eye fixations via an LSTM-based saliency attentive model},
-  author={Cornia, Marcella and Baraldi, Lorenzo and Serra, Giuseppe and Cucchiara, Rita},
-  journal={arXiv preprint arXiv:1611.09571},
-  year={2016}
+@inproceedings{vaswani2017attention,
+  title={Attention is all you need},
+  author={Vaswani, Ashish and Shazeer, Noam and Parmar, Niki and Uszkoreit, Jakob and Jones, Llion and Gomez, Aidan N and Kaiser, {\L}ukasz and Polosukhin, Illia},
+  booktitle={Advances in Neural Information Processing Systems},
+  pages={6000--6010},
+  year={2017}
 }
-
 
