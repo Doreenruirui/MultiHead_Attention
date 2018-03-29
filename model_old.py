@@ -24,8 +24,8 @@ class Model:
         self.src_tok = tf.placeholder(dtype=tf.int32, shape=[None, None])
         # len_out * batch_size
         self.tgt_tok = tf.placeholder(dtype=tf.int32, shape=[None, None])
-        self.src_mask = tf.placeholder(dtype=tf.bool, shape=[None, None])
-        self.tgt_mask = tf.placeholder(dtype=tf.bool, shape=[None, None])
+        self.src_mask = tf.placeholder(dtype=tf.float32, shape=[None, None])
+        self.tgt_mask = tf.placeholder(dtype=tf.float32, shape=[None, None])
 
         self.len_inp = tf.shape(self.src_tok)[1]
         self.len_out = tf.shape(self.tgt_tok)[1]
@@ -34,11 +34,7 @@ class Model:
         self.learning_rate = tf.Variable(float(learning_rate), trainable=False)
         self.learning_rate_decay_op = self.learning_rate.assign(self.learning_rate * learning_rate_decay_factor)
         self.global_step = tf.Variable(0, trainable=False)
-        # start = self.num_units ** (-0.5)
-        # self.learning_rate_decay_op = self.learning_rate.assign(start * tf.minimum(1./tf.sqrt(tf.cast(self.global_step, tf.float32)),
-        #                                                                            tf.cast(self.global_step, tf.float32)  / (4000 * 200)))
         self.create_model()
-
 
     def _get_pos_embedding(self, len_inp, batch_size):
         src_pos = tf.tile(tf.reshape(tf.range(len_inp), [1, -1]), [batch_size, 1])
@@ -52,13 +48,20 @@ class Model:
             return embedding_ops.embedding_lookup(self.dec_emb, self.tgt_tok) * (self.num_units ** 0.5)
 
     def _multi_head(self, queries, keys, query_mask, key_mask, num_heads, block_feature=False, scope='multihead', reuse=None):
+        '''
+        :param queries: batch_size * seq_size_q * num_units
+        :param keys:  batch_size * seq_size_k * num_units
+        :param values:  batch_size * seq_size_k * num_units
+        :param query_mask:  batch_size * seq_size_q
+        :param key_mask: batch_size * seq_size_k
+        :return:  batch_size * seq_size_q * num_units
+        '''
         with vs.variable_scope(scope, reuse=reuse):
-            # batch_size * seq_size_q * num_units
+            # Linear Transformation
             Q = rnn_cell._linear(tf.reshape(queries,
                                             [-1, self.num_units]),
                                  self.num_units, True, 1.0, scope='Q')
             Q = tf.reshape(Q, tf.shape(queries))
-            # batch_size * seq_size_k * num_units
             K = rnn_cell._linear(tf.reshape(keys,
                                             [-1, self.num_units]),
                                  self.num_units, True, 1.0, scope='K')
@@ -74,30 +77,45 @@ class Model:
             len_k = tf.shape(keys)[1]
 
             # Compute weight
+            # weights = tf.batch_matmul(Q_, tf.transpose(K_, [0,1,3,2])) \
+            #           / ((self.num_units/num_heads) ** 0.5)    # num_heads * batch_size * seq_size_q * seq_size_k
+            # weights = tf.exp(weights - tf.reduce_max(weights, reduction_indices=3,
+            #                                          keep_dims=True))  # num_heads * batch_size * seq_size_q * seq_size_k
+            # weights = tf.transpose(weights, [0, 2, 1, 3]) * key_mask # num_heads * seq_size_q * batch_size * seq_size_k
+
             weights = tf.batch_matmul(Q_, tf.transpose(K_, [0,1,3,2])) \
-                      / ((self.num_units/num_heads) ** 0.5)    # num_heads * batch_size * seq_size_q * seq_size_k
+                      / ((self.num_units/num_heads) ** 0.5)   # num_heads * batch_size * seq_size_q * seq_size_k
             key_mask = tf.tile(tf.reshape(key_mask, [1, -1, 1, len_k]), [num_heads, 1, len_q, 1])
-            weights = tf.select(key_mask, weights, tf.ones_like(weights) * (-2**32 + 1))
+            paddings = tf.ones_like(weights)*(-2**32+1)
+            weights = tf.select(tf.equal(key_mask, 0.), paddings, weights)
 
             if block_feature:
                 diag_vals = tf.ones_like(weights[0, 0, :, :]) # seq_size_q * seq_size_k
-                mask = tf.cast(tf.batch_matrix_band_part(diag_vals, -1, 0), tf.bool)
+                mask = tf.batch_matrix_band_part(diag_vals, -1, 0) # num_heads * batch_size * seq_size_q * seq_size_k
                 mask = tf.tile(tf.reshape(mask, [1, 1, len_q, len_k]), [num_heads, tf.shape(queries)[0], 1, 1])
-                weights = tf.select(mask, weights, tf.ones_like(weights) * (-2 ** 32 + 1))
+                paddings = tf.ones_like(mask) * (-2 ** 32 + 1)
+                weights = tf.select(tf.equal(mask, 0), paddings, weights)  # (h*N, T_q, T_k)
+                # weights = tf.transpose(tf.transpose(weights, [0, 2, 1, 3]) * mask, [0, 2, 1, 3])
 
-            weights = tf.reshape(tf.nn.softmax(tf.reshape(weights, [-1, len_k])),
-                                 [num_heads, -1, len_q, len_k])
+
+            # weights = weights / (1e-6 + tf.reduce_sum(weights, reduction_indices=3, keep_dims=True)) # num_heads * seq_size_q * batch_size * seq_size_k
+            weights = tf.nn.softmax(tf.reshape(weights, [-1, len_k]))
+            weights = tf.reshape(weights, [num_heads, -1, len_q, len_k])
             # num_heads * batch_size * seq_size_q * num_units/num_heads
+            # ctx = tf.batch_matmul(tf.transpose(weights, [0, 2, 1, 3]),   # num_heads * batch_size * seq_size_q * seq_size_k
+            #                                    V_) # num_heads * batch_size * seq_size_k  * num_units/num_heads
+            #  num_heads * batch_size * seq_size_q  * num_units/num_heads
             ctx = tf.batch_matmul(weights,  V_)
 
-            ctx *= tf.reshape(tf.cast(query_mask, tf.float32), [-1, len_q, 1]) # num_heads * batch_size * seq_size_q * num_units/num_heads
+            ctx *= tf.reshape(query_mask, [-1, len_q, 1]) # num_heads * batch_size * seq_size_q * num_units/num_heads
             ctx = tf.concat(2, tf.unpack(ctx))  # batch_size * seq_size_q * num_units
             ctx = rnn_cell._linear(tf.reshape(ctx, [-1, self.num_units]), self.num_units, True, 1.0, scope='context')
             ctx = tf.reshape(ctx, [-1, len_q, self.num_units])
+            #res = ctx
             drop_ctx = tf.nn.dropout(ctx, keep_prob=self.keep_prob)
             # Add and Normalization
             res = layer_normalization(drop_ctx + queries)
-        return  res, weights
+        return  res, ctx, drop_ctx, queries, weights
 
     def _feed_forward(self, inputs, num_units, scope="Feed_Forward", reuse=None):
         '''
@@ -146,45 +164,48 @@ class Model:
                 inp = self.enc_inp
                 for i in xrange(self.num_layers):
                     with vs.variable_scope('Encoder_Layer%d' % i):
-                        sub1, self.enc_w = self._multi_head(inp, inp,
+                        self.sub1, self.enc_ctx, self.enc_drop_ctx, self.enc_queries, self.enc_weights = self._multi_head(inp, inp,
                                                 self.src_mask, self.src_mask, self.num_heads)
-                        inp = self._feed_forward(sub1, num_units=4 * self.num_units)
-                self.enc_output = inp
+                        self.inp = self._feed_forward(self.sub1, num_units=4 * self.num_units)
+                self.enc_output = self.inp
             with vs.variable_scope('Decoder'):
                 out = self.dec_inp
                 for i in xrange(self.num_layers):
                     with vs.variable_scope('Decoder_Layer%d' % i):
-                        sub1, self.dec_w = self._multi_head(out, out,
+                        self.sub1, self.dec_ctx, self.dec_drop_ctx, self.dec_queries, self.dec_weights = self._multi_head(out, out,
                                                 self.tgt_mask, self.tgt_mask,
                                                 self.num_heads,
                                                 block_feature=True,
                                                 scope='self_attention')
-                        sub2, self.dec_w_2 = self._multi_head(sub1, self.enc_output,
+                        self.sub2, self.dec_ctx_2, self.dec_drop_ctx_2, self.dec_queries_2, self.dec_weights_2 = self._multi_head(self.sub1, self.enc_output,
                                                 self.tgt_mask, self.src_mask,
                                                 self.num_heads,
                                                 scope='vanilla_attention')
-                        out = self._feed_forward(sub2, num_units=4 * self.num_units)
+                        out = self._feed_forward(self.sub2, num_units=4 * self.num_units)
                 self.dec_output = out
-
             with vs.variable_scope("Logistic"):
                 doshape = tf.shape(self.dec_output)
                 batch_size, T = doshape[0], doshape[1]
                 do2d = tf.reshape(self.dec_output, [-1, self.num_units])
-                logits = rnn_cell._linear(do2d, self.vocab_size, True, 1.0)
-                self.outputs = tf.reshape(tf.arg_max(tf.nn.softmax(logits), 1), [batch_size, T, -1])
+                logits2d = rnn_cell._linear(do2d, self.vocab_size, True, 1.0)
+                self.logits2d = logits2d
+                outputs2d = tf.nn.log_softmax(logits2d)
+                self.outputs = tf.reshape(outputs2d, tf.pack([batch_size, T, self.vocab_size]))
+
                 targets_no_GO = tf.slice(self.tgt_tok, [0, 1], [-1, -1])
                 masks_no_GO = tf.slice(self.tgt_mask, [0, 1], [-1, -1])
                 # easier to pad target/mask than to split decoder input since tensorflow does not support negative indexing
-                labels = tf.reshape(tf.pad(targets_no_GO,[[0,0],[0,1]]), [-1])
-                labels = tf.one_hot(labels, depth=self.vocab_size)
-                labels = tf.reshape(0.9 * labels + 0.1 / self.vocab_size, [batch_size * T, -1])
-                mask = tf.reshape(tf.pad(masks_no_GO, [[0, 0], [0, 1]]), [-1])
-                losses = tf.nn.softmax_cross_entropy_with_logits(logits, labels) * tf.cast(mask, tf.float32)
-                losses2d = tf.reshape(losses, tf.pack([batch_size, T]))
+                labels1d = tf.reshape(tf.pad(targets_no_GO, [[0, 0], [0, 1]]), [-1])
+                self.labels1d = tf.reshape(labels1d, [batch_size, T])
+                mask1d = tf.reshape(tf.pad(masks_no_GO, [[0, 0], [0, 1]]), [-1])
+                self.mask1d  = tf.reshape(mask1d, [batch_size, T])
+                losses1d = tf.nn.sparse_softmax_cross_entropy_with_logits(logits2d, labels1d) * tf.to_float(mask1d)
+                losses2d = tf.reshape(losses1d, tf.pack([batch_size, T]))
+                self.losses2d = losses2d
                 self.losses = tf.reduce_sum(losses2d) / tf.to_float(batch_size)
             params = tf.trainable_variables()
             if not self.forward_only:
-                opt = get_optimizer('adam')(self.learning_rate, beta1=0.9, beta2=0.98, epsilon=1e-9)
+                opt = get_optimizer('adam')(self.learning_rate)
                 gradients = tf.gradients(self.losses, params)
                 clipped_gradients, _ = tf.clip_by_global_norm(
                     gradients, self.max_gradient_norm)
@@ -204,7 +225,6 @@ class Model:
         output_feed = [self.updates, self.gradient_norm,
                        self.losses, self.param_norm]
         outputs = session.run(output_feed, input_feed)
-        session.run(self.learning_rate_decay_op)
         return outputs[1], outputs[2], outputs[3]
 
     def test(self, session, source_tokens, target_tokens, source_mask, target_mask):

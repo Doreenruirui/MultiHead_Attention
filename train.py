@@ -66,7 +66,7 @@ def create_model(session, vocab_size, forward_only):
 def validate(model, sess, x_dev, y_dev):
     valid_costs, valid_lengths = [], []
     for source_tokens, source_mask, target_tokens, target_mask in pair_iter(x_dev, y_dev, FLAGS.batch_size, FLAGS.num_layers, sort_and_shuffle=False):
-        cost = model.test(sess, source_tokens, source_mask, target_tokens, target_mask)
+        cost = model.test(sess, source_tokens, target_tokens, source_mask,  target_mask)
         valid_costs.append(cost * target_mask.shape[1])
         valid_lengths.append(np.sum(target_mask[1:, :]))
     valid_cost = sum(valid_costs) / float(sum(valid_lengths))
@@ -94,7 +94,7 @@ def train():
         json.dump(FLAGS.__flags, fout)
 
     with tf.Session() as sess:
-        logging.info("Creating %d layers of %d units." % (FLAGS.num_layers, FLAGS.size))
+        logging.info("Creating %d layers of %d units." % (FLAGS.num_layers, FLAGS.num_units))
         model, epoch = create_model(sess, vocab_size, False)
 
         best_epoch = 0
@@ -111,11 +111,11 @@ def train():
 
             ## Train
             epoch_tic = time.time()
-            for source_tokens, target_tokens in pair_iter(x_train, y_train, FLAGS.batch_size, FLAGS.num_layers):
+            for source_tokens, source_mask, target_tokens, target_mask in pair_iter(x_train, y_train, FLAGS.batch_size, FLAGS.num_layers):
                 # Get a batch and make a step.
                 tic = time.time()
 
-                grad_norm, cost, param_norm, target_mask = model.train(sess, source_tokens, target_tokens)
+                grad_norm, cost, param_norm = model.train(sess, source_tokens, target_tokens, source_mask, target_mask)
 
                 toc = time.time()
                 iter_time = toc - tic
@@ -153,7 +153,7 @@ def train():
 
             if len(previous_losses) > 2 and valid_cost > previous_losses[-1]:
                 logging.info("Annealing learning rate by %f" % FLAGS.learning_rate_decay_factor)
-                sess.run(model.learning_rate_decay_op)
+                # sess.run(model.learning_rate_decay_op)
                 model.saver.restore(sess, checkpoint_path + ("-%d" % best_epoch))
             else:
                 previous_losses.append(valid_cost)

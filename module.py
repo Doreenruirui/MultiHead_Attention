@@ -5,7 +5,7 @@ def sequence_mask(lens, max_len):
     len_t = tf.expand_dims(lens, 1)
     range_t = tf.range(0, max_len, 1)
     range_row = tf.expand_dims(range_t, 0)
-    mask = tf.less(range_row, len_t)
+    mask = tf.cast(tf.less(range_row, len_t), tf.float32)
     return mask
 
 
@@ -14,7 +14,7 @@ def layer_normalization(inputs, epsilon=1e-8, scope='ln', reuse=None):
         inputs_shape = inputs.get_shape()
         params_shape = inputs_shape[-1:]
 
-        mean, variance = tf.nn.moments(inputs, [-1], keep_dims=True)
+        mean, variance = tf.nn.moments(inputs, [2], keep_dims=True)
         beta = tf.Variable(tf.zeros(params_shape))
         gamma = tf.Variable(tf.ones(params_shape))
         normalized = (inputs - mean) / ((variance + epsilon) ** (.5))

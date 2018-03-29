@@ -60,9 +60,9 @@ def pair_iter(fnamex, fnamey, batch_size, num_layers, sort_and_shuffle=True):
     x_padded, y_padded = padded(x_tokens, num_layers), padded(y_tokens, 1)
 
     source_tokens = np.array(x_padded).T
-    source_mask = (source_tokens != PAD_ID).astype(np.int32)
+    source_mask = (source_tokens != PAD_ID).astype(np.float32)
     target_tokens = np.array(y_padded).T
-    target_mask = (target_tokens != PAD_ID).astype(np.int32)
+    target_mask = (target_tokens != PAD_ID).astype(np.float32)
 
     yield (source_tokens, source_mask, target_tokens, target_mask)
 

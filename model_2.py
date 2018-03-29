@@ -34,11 +34,7 @@ class Model:
         self.learning_rate = tf.Variable(float(learning_rate), trainable=False)
         self.learning_rate_decay_op = self.learning_rate.assign(self.learning_rate * learning_rate_decay_factor)
         self.global_step = tf.Variable(0, trainable=False)
-        # start = self.num_units ** (-0.5)
-        # self.learning_rate_decay_op = self.learning_rate.assign(start * tf.minimum(1./tf.sqrt(tf.cast(self.global_step, tf.float32)),
-        #                                                                            tf.cast(self.global_step, tf.float32)  / (4000 * 200)))
         self.create_model()
-
 
     def _get_pos_embedding(self, len_inp, batch_size):
         src_pos = tf.tile(tf.reshape(tf.range(len_inp), [1, -1]), [batch_size, 1])
@@ -171,20 +167,21 @@ class Model:
                 batch_size, T = doshape[0], doshape[1]
                 do2d = tf.reshape(self.dec_output, [-1, self.num_units])
                 logits = rnn_cell._linear(do2d, self.vocab_size, True, 1.0)
-                self.outputs = tf.reshape(tf.arg_max(tf.nn.softmax(logits), 1), [batch_size, T, -1])
+                self.outputs = tf.nn.softmax(logits)
                 targets_no_GO = tf.slice(self.tgt_tok, [0, 1], [-1, -1])
                 masks_no_GO = tf.slice(self.tgt_mask, [0, 1], [-1, -1])
                 # easier to pad target/mask than to split decoder input since tensorflow does not support negative indexing
                 labels = tf.reshape(tf.pad(targets_no_GO,[[0,0],[0,1]]), [-1])
                 labels = tf.one_hot(labels, depth=self.vocab_size)
                 labels = tf.reshape(0.9 * labels + 0.1 / self.vocab_size, [batch_size * T, -1])
+                self.labels = labels
                 mask = tf.reshape(tf.pad(masks_no_GO, [[0, 0], [0, 1]]), [-1])
                 losses = tf.nn.softmax_cross_entropy_with_logits(logits, labels) * tf.cast(mask, tf.float32)
                 losses2d = tf.reshape(losses, tf.pack([batch_size, T]))
                 self.losses = tf.reduce_sum(losses2d) / tf.to_float(batch_size)
             params = tf.trainable_variables()
             if not self.forward_only:
-                opt = get_optimizer('adam')(self.learning_rate, beta1=0.9, beta2=0.98, epsilon=1e-9)
+                opt = get_optimizer('adam')(self.learning_rate)
                 gradients = tf.gradients(self.losses, params)
                 clipped_gradients, _ = tf.clip_by_global_norm(
                     gradients, self.max_gradient_norm)
@@ -204,7 +201,6 @@ class Model:
         output_feed = [self.updates, self.gradient_norm,
                        self.losses, self.param_norm]
         outputs = session.run(output_feed, input_feed)
-        session.run(self.learning_rate_decay_op)
         return outputs[1], outputs[2], outputs[3]
 
     def test(self, session, source_tokens, target_tokens, source_mask, target_mask):
